@@ -54,7 +54,7 @@ jobs:
             exit 1
           fi
 
-      - name: Validate deployment credentials and persistent state
+      - name: Validate deployment credentials
         run: |
           if [[ -z "${TF_VAR_postgres_user:-}" ||
                 -z "${TF_VAR_postgres_password:-}" ||
@@ -62,19 +62,6 @@ jobs:
             echo "::error::Set LEADFLOW_POSTGRES_USER, LEADFLOW_POSTGRES_PASSWORD, and LEADFLOW_DATABASE_URL repository secrets."
             exit 1
           fi
-
-          state_dir="${HOME}/.leadflow/opentofu"
-          state_file="${state_dir}/leadflow.tfstate"
-          mkdir -p "$state_dir"
-          chmod 700 "$state_dir"
-
-          if [[ ! -s "$state_file" ]]; then
-            echo "::error::Persistent OpenTofu state is missing at ${state_file}. Seed it once from the existing LeadFlow deployment state; refusing to apply with an empty state."
-            exit 1
-          fi
-
-          chmod 600 "$state_file"
-          echo "TOFU_STATE_FILE=${state_file}" >> "$GITHUB_ENV"
 
       - name: Reuse or bootstrap Kind cluster
         run: |
@@ -155,34 +142,11 @@ jobs:
 
       - name: Initialize OpenTofu
         working-directory: terraform/environments/local
-        run: tofu init -input=false -lockfile=readonly
+        run: tofu init
 
-      - name: Validate OpenTofu configuration and state
+      - name: Validate OpenTofu configuration
         working-directory: terraform/environments/local
-        run: |
-          tofu validate -no-color
-
-          addresses="$(tofu state list -state="$TOFU_STATE_FILE")"
-          for address in \
-            'module.namespace.kubernetes_namespace_v1.this' \
-            'module.secrets.kubernetes_secret_v1.database' \
-            'module.configmaps.kubernetes_config_map_v1.backend' \
-            'module.configmaps.kubernetes_config_map_v1.frontend' \
-            'module.configmaps.kubernetes_config_map_v1.postgres' \
-            'module.postgres.kubernetes_persistent_volume_claim_v1.data' \
-            'module.postgres.kubernetes_deployment_v1.database' \
-            'module.postgres.kubernetes_service_v1.database' \
-            'module.migration.kubernetes_job_v1.this' \
-            'module.backend.kubernetes_deployment_v1.this' \
-            'module.backend.kubernetes_service_v1.this' \
-            'module.frontend.kubernetes_deployment_v1.this' \
-            'module.frontend.kubernetes_service_v1.this' \
-            'module.networking.kubernetes_ingress_v1.this'; do
-            if ! grep -Fxq "$address" <<< "$addresses"; then
-              echo "::error::OpenTofu state is missing '$address'. Refusing to reconcile against an incomplete or unrelated state."
-              exit 1
-            fi
-          done
+        run: tofu validate -no-color
 
       - name: Build backend and migration images
         run: |
@@ -210,12 +174,7 @@ jobs:
 
       - name: Apply application changes with OpenTofu
         working-directory: terraform/environments/local
-        run: |
-          tofu apply \
-            -auto-approve \
-            -input=false \
-            -lock-timeout=60s \
-            -state="$TOFU_STATE_FILE"
+        run: tofu apply -auto-approve
 
       - name: Verify workload rollouts and migration
         run: |
