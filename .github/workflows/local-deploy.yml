@@ -234,19 +234,28 @@ jobs:
               process.exitCode = 1;
             });'
 
-      - name: Check application through Ingress on localhost
+      - name: Wait for application through Ingress on localhost
         run: |
-          curl --noproxy '*' \
-            --fail \
-            --silent \
-            --show-error \
-            --retry 12 \
-            --retry-connrefused \
-            --retry-delay 5 \
-            --retry-max-time 90 \
+         echo "Waiting for frontend..."
+
+         for i in {1..30}; do
+           STATUS=$(curl --noproxy '*' \
+           --silent \
             --output /dev/null \
-            --write-out 'Ingress returned HTTP %{http_code}\n' \
-            http://127.0.0.1/
+            --write-out "%{http_code}" \
+            http://localhost/ || true)
+
+         if [ "$STATUS" = "200" ]; then
+            echo "Frontend is healthy."
+         exit 0
+         fi
+
+          echo "Attempt $i: HTTP $STATUS"
+         sleep 5
+         done
+
+         echo "Frontend never became healthy."
+         exit 1
 
       - name: Collect cluster diagnostics on failure
         if: failure()
