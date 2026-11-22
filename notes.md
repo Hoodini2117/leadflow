@@ -568,3 +568,133 @@ kubectl get pods -A
 - Ingress resources require an Ingress Controller to route external traffic.
 - Database migrations should execute as a Kubernetes Job before application deployments.
 - Validating each infrastructure layer individually (storage, database, migration, backend, frontend, ingress) significantly simplifies troubleshooting.
+---
+
+# Final Outcomes
+
+## Deliverables Completed
+
+- Dockerized frontend, backend and migration service.
+- Provisioned complete infrastructure using OpenTofu.
+- Deployed application on a local Kubernetes (Kind) cluster.
+- Configured PostgreSQL with persistent Kubernetes deployment.
+- Automated database schema migrations using Kubernetes Jobs.
+- Exposed application through NGINX Ingress.
+- Implemented GitHub Actions CI pipeline for automated validation and deployment.
+- Configured a self-hosted GitHub Actions runner for local Kubernetes deployments.
+- Added automated rollout verification and application health checks.
+- Implemented Kubernetes rolling deployments with rollback support.
+- Secured sensitive configuration using GitHub Secrets and Kubernetes Secrets.
+
+---
+
+# Design Decisions
+
+## Why Docker?
+
+Docker provides identical runtime environments across local development, CI pipelines and Kubernetes, eliminating environment-specific issues and making deployments reproducible.
+
+---
+
+## Why Kind?
+
+Kind was selected because it provides a lightweight Kubernetes cluster locally without requiring cloud infrastructure. It closely mimics production Kubernetes behaviour while remaining fast and easy to recreate.
+
+---
+
+## Why OpenTofu?
+
+OpenTofu was used as the Infrastructure as Code solution to provision every Kubernetes resource declaratively. Managing infrastructure through code improves reproducibility, version control and maintainability.
+
+---
+
+## Why GitHub Actions?
+
+GitHub Actions integrates directly with the repository and provides automated testing, image building and deployments on every push without requiring additional CI/CD tooling.
+
+---
+
+## Why Self-Hosted Runner?
+
+A self-hosted runner enables deployments directly onto the local Kubernetes cluster while using the same GitHub Actions workflow, closely simulating a production deployment environment.
+
+---
+
+# Major Challenges
+
+### Kubernetes Migration Job
+
+The migration job initially exceeded its timeout and later failed due to database connectivity and image loading issues. These were resolved by validating the database configuration, correcting image availability inside Kind and verifying migration execution independently.
+
+---
+
+### ImagePullBackOff
+
+Kubernetes attempted to pull locally built Docker images from Docker Hub. Since these images existed only on the local machine, they were loaded into the Kind cluster using `kind load docker-image`.
+
+---
+
+### OpenTofu State Management
+
+Maintaining infrastructure state during repeated deployments required careful synchronization between Kubernetes resources and the OpenTofu state file. Proper state management ensured resources were updated rather than recreated.
+
+---
+
+### Self-Hosted Runner Setup
+
+The deployment workflow initially remained queued because no self-hosted runner was registered. Registering the runner, configuring repository secrets and validating runner labels resolved the issue.
+
+---
+
+### Ingress Validation
+
+Application deployment succeeded while automated smoke tests initially returned HTTP 404 responses. This was resolved by validating ingress configuration, rollout completion and ensuring application readiness before performing health checks.
+
+---
+
+# Lessons Learned
+
+- Infrastructure should always be managed declaratively.
+- Kubernetes deployments become significantly easier when applications are properly containerized.
+- Automated database migrations improve deployment consistency.
+- Health checks and rollout verification increase deployment reliability.
+- Separating CI from deployment simplifies troubleshooting and improves pipeline maintainability.
+- Proper secret management is essential for production-ready applications.
+- Self-hosted runners provide an effective way to deploy directly into private infrastructure.
+
+---
+
+# Skills Demonstrated
+
+- Docker Containerization
+- Kubernetes
+- OpenTofu (Terraform)
+- Infrastructure as Code
+- GitHub Actions CI/CD
+- Self-Hosted GitHub Runners
+- PostgreSQL
+- Kubernetes Jobs
+- NGINX Ingress
+- Secrets Management
+- Rolling Deployments
+- Deployment Rollback
+- Production Debugging
+- DevOps Troubleshooting
+
+---
+
+# Future Improvements
+
+- Implement Blue/Green deployments.
+- Introduce Canary deployment strategy.
+- Store OpenTofu state remotely.
+- Integrate Prometheus and Grafana monitoring.
+- Add Horizontal Pod Autoscaler.
+- Enable TLS using cert-manager.
+- Adopt GitOps deployment with ArgoCD.
+
+---
+
+# Project Summary
+
+This project demonstrates a production-inspired DevOps workflow where infrastructure, application deployment, database migrations and continuous delivery are managed entirely through code. The final solution combines Docker, Kubernetes, OpenTofu and GitHub Actions to create a reproducible, scalable and maintainable deployment pipeline that closely resembles modern cloud-native deployment practices.
