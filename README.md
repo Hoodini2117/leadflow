@@ -338,19 +338,6 @@ Use the corresponding `frontend` Deployment commands when needed. This is a Kube
 | Credential handling | Database credentials are required by PostgreSQL, the API, and migrations. | Pass them through GitHub Secrets and Kubernetes Secrets; keep example files as templates. | Protect both the secret source and any state that may contain secret values. |
 | Rollout timing | Kubernetes accepts desired state before the workloads are necessarily ready. | Wait for Deployment rollout and migration completion with explicit timeouts before HTTP smoke tests. | API acceptance is not the same as application readiness. |
 
-## Screenshots
-
-No project screenshots are included yet. Add captures to `docs/screenshots/` as the portfolio is updated.
-
-| View | Screenshot placeholder |
-|---|---|
-| Architecture diagram | `docs/screenshots/architecture.png` |
-| GitHub Actions CI success | `docs/screenshots/ci-success.png` |
-| Self-hosted runner deployment | `docs/screenshots/local-deployment.png` |
-| OpenTofu apply | `docs/screenshots/opentofu-apply.png` |
-| Kubernetes resources (`kubectl get all`) | `docs/screenshots/kubernetes-resources.png` |
-| Application running at localhost | `docs/screenshots/application.png` |
-| Rollback demonstration | `docs/screenshots/rollback.png` |
 
 ## Future improvements
 
