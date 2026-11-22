@@ -1,0 +1,276 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Test backend and check frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # Backend integration tests run migrations and truncate tables. Keep this
+    # database isolated to the job and never use production credentials.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: leadflow
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d leadflow"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+          --health-start-period 10s
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/leadflow
+      DB_POOL_MAX: "10"
+      PORT: "3000"
+      APP_VERSION: ci
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js LTS
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: npm ci
+
+      - name: Run backend integration tests
+        working-directory: backend
+        run: npm test
+
+      - name: Type-check backend
+        working-directory: backend
+        run: npm run lint
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      # The frontend currently defines lint/build scripts but no test script.
+      - name: Lint frontend
+        working-directory: frontend
+        run: npm run lint
+
+  build-images:
+    name: Build backend, migration, and frontend images
+    runs-on: ubuntu-latest
+    needs: verify
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # The migration Job uses the backend image with a command override, so
+      # build that Dockerfile once and tag the same image for both workloads.
+      - name: Build backend and migration images
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          load: true
+          tags: |
+            leadflow-backend:${{ github.sha }}
+            leadflow-migrate:${{ github.sha }}
+          cache-from: type=gha,scope=leadflow-backend
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=leadflow-backend' || '' }}
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: false
+          load: true
+          tags: leadflow-frontend:${{ github.sha }}
+          build-args: |
+            API_INTERNAL_URL=http://backend:3000
+          cache-from: type=gha,scope=leadflow-frontend
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max,scope=leadflow-frontend' || '' }}
+
+      - name: Export images for the deployment job
+        run: |
+          docker save \
+            leadflow-backend:${{ github.sha }} \
+            leadflow-migrate:${{ github.sha }} \
+            leadflow-frontend:${{ github.sha }} |
+            gzip -1 > leadflow-images.tar.gz
+
+      - name: Upload images for the deployment job
+        uses: actions/upload-artifact@v4
+        with:
+          name: leadflow-images-${{ github.run_id }}-${{ github.sha }}
+          path: leadflow-images.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  deploy-kind:
+    name: Deploy and verify on Kind
+    runs-on: ubuntu-latest
+    needs: build-images
+    timeout-minutes: 35
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1.15.1
+        with:
+          cluster_name: leadflow
+          config: kind-config.yml
+          wait: 120s
+
+      # Match scripts/create-kind.sh: bootstrap the cluster add-on separately
+      # from the application resources managed by OpenTofu.
+      - name: Install official NGINX Ingress Controller for Kind
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+          kubectl wait \
+            --namespace ingress-nginx \
+            --for=condition=ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=180s
+
+      - name: Download built images
+        uses: actions/download-artifact@v4
+        with:
+          name: leadflow-images-${{ github.run_id }}-${{ github.sha }}
+          path: ./image-artifact
+
+      - name: Load application images into Kind
+        run: |
+          gzip -dc ./image-artifact/leadflow-images.tar.gz | docker load
+          kind load docker-image \
+            leadflow-backend:${{ github.sha }} \
+            leadflow-migrate:${{ github.sha }} \
+            leadflow-frontend:${{ github.sha }} \
+            --name leadflow
+
+      - name: Set ephemeral OpenTofu deployment inputs
+        shell: bash
+        run: |
+          password="$(openssl rand -hex 24)"
+          database_url="postgres://leadflow_ci:${password}@postgres:5432/leadflow"
+
+          echo "::add-mask::${password}"
+          echo "::add-mask::${database_url}"
+          {
+            echo "TF_VAR_postgres_user=leadflow_ci"
+            echo "TF_VAR_postgres_password=${password}"
+            echo "TF_VAR_database_url=${database_url}"
+            echo "TF_VAR_app_version=${GITHUB_SHA}"
+            echo "TF_VAR_backend_image_tag=${GITHUB_SHA}"
+            echo "TF_VAR_migration_image_tag=${GITHUB_SHA}"
+            echo "TF_VAR_frontend_image_tag=${GITHUB_SHA}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Set up OpenTofu
+        uses: opentofu/setup-opentofu@v2
+        with:
+          tofu_version: 1.12.6
+          tofu_wrapper: false
+
+      - name: Initialize OpenTofu
+        working-directory: terraform/environments/local
+        run: tofu init -input=false
+
+      - name: Validate OpenTofu configuration
+        working-directory: terraform/environments/local
+        run: tofu validate -no-color
+
+      - name: Apply application infrastructure
+        working-directory: terraform/environments/local
+        run: tofu apply -auto-approve -input=false -no-color
+
+      - name: Verify workload rollouts and migration
+        run: |
+          kubectl rollout status deployment/postgres \
+            --namespace leadflow \
+            --timeout=300s
+          kubectl wait \
+            --namespace leadflow \
+            --for=condition=complete \
+            job/leadflow-migrate \
+            --timeout=300s
+          kubectl rollout status deployment/backend \
+            --namespace leadflow \
+            --timeout=300s
+          kubectl rollout status deployment/frontend \
+            --namespace leadflow \
+            --timeout=300s
+
+      - name: Inspect deployed resources
+        run: |
+          kubectl get all --namespace leadflow
+          kubectl get ingress --namespace leadflow
+          kubectl get endpoints --namespace leadflow
+
+      - name: Check backend health endpoint
+        run: |
+          kubectl run leadflow-healthcheck \
+            --namespace leadflow \
+            --image=curlimages/curl:8.12.1 \
+            --restart=Never \
+            --rm \
+            --attach \
+            --pod-running-timeout=90s \
+            --command -- \
+            curl --fail --silent --show-error \
+              --retry 5 \
+              --retry-connrefused \
+              --retry-delay 2 \
+              --retry-max-time 30 \
+              http://backend:3000/healthz
+
+      - name: Check ingress reachability
+        run: |
+          curl --fail --silent --show-error \
+            --retry 12 \
+            --retry-connrefused \
+            --retry-delay 5 \
+            --retry-max-time 90 \
+            http://127.0.0.1/
+            
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          kubectl get all -A
+          kubectl describe pods -n leadflow
+          kubectl logs -n leadflow --all-containers --tail=200
