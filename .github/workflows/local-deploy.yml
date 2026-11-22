@@ -54,22 +54,6 @@ jobs:
             exit 1
           fi
 
-      - name: Verify existing Kind cluster and ingress controller
-        run: |
-          if ! kind get clusters | grep -Fxq "$KIND_CLUSTER_NAME"; then
-            echo "::error::Kind cluster '$KIND_CLUSTER_NAME' does not exist. This deploy-only workflow will not create it."
-            exit 1
-          fi
-
-          kubectl cluster-info --context "$KUBERNETES_CONTEXT"
-          kubectl get nodes --context "$KUBERNETES_CONTEXT"
-          kubectl wait \
-            --context "$KUBERNETES_CONTEXT" \
-            --namespace ingress-nginx \
-            --for=condition=Ready pod \
-            --selector=app.kubernetes.io/component=controller \
-            --timeout=180s
-
       - name: Validate deployment credentials and persistent state
         run: |
           if [[ -z "${TF_VAR_postgres_user:-}" ||
@@ -91,6 +75,83 @@ jobs:
 
           chmod 600 "$state_file"
           echo "TOFU_STATE_FILE=${state_file}" >> "$GITHUB_ENV"
+
+      - name: Reuse or bootstrap Kind cluster
+        run: |
+          if kind get clusters | grep -Fxq "$KIND_CLUSTER_NAME"; then
+            echo "Kind cluster found. Reusing existing cluster."
+          else
+            echo "Kind cluster not found. Creating local development cluster..."
+            if bash scripts/create-kind.sh; then
+              echo "Kind cluster bootstrap completed."
+            elif kind get clusters | grep -Fxq "$KIND_CLUSTER_NAME"; then
+              echo "::warning::Cluster creation started but the bootstrap script returned an error. Continuing with readiness and ingress checks."
+            else
+              echo "::error::Kind cluster bootstrap failed and the cluster is still absent."
+              exit 1
+            fi
+          fi
+
+      - name: Wait for Kind cluster and verify context
+        run: |
+          echo "Refreshing kubeconfig for Kind cluster '$KIND_CLUSTER_NAME'..."
+          kind export kubeconfig --name "$KIND_CLUSTER_NAME"
+          echo "Selecting Kubernetes context '$KUBERNETES_CONTEXT'..."
+          kubectl config use-context "$KUBERNETES_CONTEXT"
+          current_context="$(kubectl config current-context)"
+          if [[ "$current_context" != "$KUBERNETES_CONTEXT" ]]; then
+            echo "::error::Expected kubectl context '$KUBERNETES_CONTEXT', got '$current_context'."
+            exit 1
+          fi
+
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::Docker Desktop became unavailable during cluster bootstrap."
+            exit 1
+          fi
+
+          echo "Waiting for Kind control-plane nodes to become Ready..."
+          nodes="$(kubectl get nodes --context "$KUBERNETES_CONTEXT" -o name)"
+          if [[ -z "$nodes" ]]; then
+            echo "::error::No nodes are registered in Kind cluster '$KIND_CLUSTER_NAME'."
+            exit 1
+          fi
+
+          while IFS= read -r node; do
+            [[ -z "$node" ]] && continue
+            echo "Waiting for $node..."
+            kubectl wait \
+              --context "$KUBERNETES_CONTEXT" \
+              --for=condition=Ready \
+              --timeout=180s \
+              "$node"
+          done <<< "$nodes"
+
+          kubectl cluster-info --context "$KUBERNETES_CONTEXT"
+          kubectl get nodes --context "$KUBERNETES_CONTEXT"
+
+      - name: Reuse or install ingress-nginx
+        run: |
+          if kubectl get deployment ingress-nginx-controller \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace ingress-nginx >/dev/null 2>&1 &&
+            kubectl get service ingress-nginx-controller \
+              --context "$KUBERNETES_CONTEXT" \
+              --namespace ingress-nginx >/dev/null 2>&1; then
+            echo "Ingress controller found. Reusing existing installation."
+          else
+            echo "Ingress controller not found. Installing the official Kind manifest..."
+            kubectl apply \
+              --context "$KUBERNETES_CONTEXT" \
+              -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml
+          fi
+
+          echo "Waiting for ingress-nginx controller to become Ready..."
+          kubectl wait \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace ingress-nginx \
+            --for=condition=Ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=180s
 
       - name: Initialize OpenTofu
         working-directory: terraform/environments/local
@@ -158,20 +219,24 @@ jobs:
 
       - name: Verify workload rollouts and migration
         run: |
+          echo "Waiting for PostgreSQL deployment..."
           kubectl rollout status deployment/postgres \
             --context "$KUBERNETES_CONTEXT" \
             --namespace leadflow \
             --timeout=10m
+          echo "Waiting for database migration Job..."
           kubectl wait \
             --context "$KUBERNETES_CONTEXT" \
             --namespace leadflow \
             --for=condition=complete \
             job/leadflow-migrate \
             --timeout=10m
+          echo "Waiting for backend deployment..."
           kubectl rollout status deployment/backend \
             --context "$KUBERNETES_CONTEXT" \
             --namespace leadflow \
             --timeout=10m
+          echo "Waiting for frontend deployment..."
           kubectl rollout status deployment/frontend \
             --context "$KUBERNETES_CONTEXT" \
             --namespace leadflow \
