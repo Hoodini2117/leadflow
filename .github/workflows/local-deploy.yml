@@ -1,0 +1,236 @@
+name: Local Kind Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: local-kind-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to persistent Kind cluster
+    runs-on:
+      - self-hosted
+      - macOS
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      KIND_CLUSTER_NAME: leadflow
+      KUBERNETES_CONTEXT: kind-leadflow
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+      TF_VAR_kube_context: kind-leadflow
+      TF_VAR_app_version: ${{ github.sha }}
+      TF_VAR_backend_image_tag: ${{ github.sha }}
+      TF_VAR_migration_image_tag: ${{ github.sha }}
+      TF_VAR_frontend_image_tag: ${{ github.sha }}
+      TF_VAR_postgres_user: ${{ secrets.LEADFLOW_POSTGRES_USER }}
+      TF_VAR_postgres_password: ${{ secrets.LEADFLOW_POSTGRES_PASSWORD }}
+      TF_VAR_database_url: ${{ secrets.LEADFLOW_DATABASE_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify deployment tools and Docker Desktop
+        run: |
+          for tool in docker kind kubectl tofu curl; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "::error::Required tool '$tool' is missing from the runner PATH."
+              exit 1
+            fi
+          done
+
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::Docker Desktop is unavailable. Start it for the self-hosted runner user."
+            exit 1
+          fi
+
+      - name: Verify existing Kind cluster and ingress controller
+        run: |
+          if ! kind get clusters | grep -Fxq "$KIND_CLUSTER_NAME"; then
+            echo "::error::Kind cluster '$KIND_CLUSTER_NAME' does not exist. This deploy-only workflow will not create it."
+            exit 1
+          fi
+
+          kubectl cluster-info --context "$KUBERNETES_CONTEXT"
+          kubectl get nodes --context "$KUBERNETES_CONTEXT"
+          kubectl wait \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace ingress-nginx \
+            --for=condition=Ready pod \
+            --selector=app.kubernetes.io/component=controller \
+            --timeout=180s
+
+      - name: Validate deployment credentials and persistent state
+        run: |
+          if [[ -z "${TF_VAR_postgres_user:-}" ||
+                -z "${TF_VAR_postgres_password:-}" ||
+                -z "${TF_VAR_database_url:-}" ]]; then
+            echo "::error::Set LEADFLOW_POSTGRES_USER, LEADFLOW_POSTGRES_PASSWORD, and LEADFLOW_DATABASE_URL repository secrets."
+            exit 1
+          fi
+
+          state_dir="${HOME}/.leadflow/opentofu"
+          state_file="${state_dir}/leadflow.tfstate"
+          mkdir -p "$state_dir"
+          chmod 700 "$state_dir"
+
+          if [[ ! -s "$state_file" ]]; then
+            echo "::error::Persistent OpenTofu state is missing at ${state_file}. Seed it once from the existing LeadFlow deployment state; refusing to apply with an empty state."
+            exit 1
+          fi
+
+          chmod 600 "$state_file"
+          echo "TOFU_STATE_FILE=${state_file}" >> "$GITHUB_ENV"
+
+      - name: Initialize OpenTofu
+        working-directory: terraform/environments/local
+        run: tofu init -input=false -lockfile=readonly
+
+      - name: Validate OpenTofu configuration and state
+        working-directory: terraform/environments/local
+        run: |
+          tofu validate -no-color
+
+          addresses="$(tofu state list -state="$TOFU_STATE_FILE")"
+          for address in \
+            'module.namespace.kubernetes_namespace_v1.this' \
+            'module.secrets.kubernetes_secret_v1.database' \
+            'module.configmaps.kubernetes_config_map_v1.backend' \
+            'module.configmaps.kubernetes_config_map_v1.frontend' \
+            'module.configmaps.kubernetes_config_map_v1.postgres' \
+            'module.postgres.kubernetes_persistent_volume_claim_v1.data' \
+            'module.postgres.kubernetes_deployment_v1.database' \
+            'module.postgres.kubernetes_service_v1.database' \
+            'module.migration.kubernetes_job_v1.this' \
+            'module.backend.kubernetes_deployment_v1.this' \
+            'module.backend.kubernetes_service_v1.this' \
+            'module.frontend.kubernetes_deployment_v1.this' \
+            'module.frontend.kubernetes_service_v1.this' \
+            'module.networking.kubernetes_ingress_v1.this'; do
+            if ! grep -Fxq "$address" <<< "$addresses"; then
+              echo "::error::OpenTofu state is missing '$address'. Refusing to reconcile against an incomplete or unrelated state."
+              exit 1
+            fi
+          done
+
+      - name: Build backend and migration images
+        run: |
+          docker build \
+            --file backend/Dockerfile \
+            --tag "leadflow-backend:${GITHUB_SHA}" \
+            --tag "leadflow-migrate:${GITHUB_SHA}" \
+            backend
+
+      - name: Build frontend image
+        run: |
+          docker build \
+            --file frontend/Dockerfile \
+            --build-arg API_INTERNAL_URL=http://backend:3000 \
+            --tag "leadflow-frontend:${GITHUB_SHA}" \
+            frontend
+
+      - name: Load commit images into the existing Kind cluster
+        run: |
+          kind load docker-image \
+            "leadflow-backend:${GITHUB_SHA}" \
+            "leadflow-migrate:${GITHUB_SHA}" \
+            "leadflow-frontend:${GITHUB_SHA}" \
+            --name "$KIND_CLUSTER_NAME"
+
+      - name: Apply application changes with OpenTofu
+        working-directory: terraform/environments/local
+        run: |
+          tofu apply \
+            -auto-approve \
+            -input=false \
+            -lock-timeout=60s \
+            -state="$TOFU_STATE_FILE"
+
+      - name: Verify workload rollouts and migration
+        run: |
+          kubectl rollout status deployment/postgres \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace leadflow \
+            --timeout=10m
+          kubectl wait \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace leadflow \
+            --for=condition=complete \
+            job/leadflow-migrate \
+            --timeout=10m
+          kubectl rollout status deployment/backend \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace leadflow \
+            --timeout=10m
+          kubectl rollout status deployment/frontend \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace leadflow \
+            --timeout=10m
+
+      - name: Verify ingress and service endpoints
+        run: |
+          kubectl get ingress leadflow \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace leadflow
+          kubectl get pods,services,endpoints \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace leadflow
+
+          for service in postgres backend frontend; do
+            endpoints="$(kubectl get endpoints "$service" \
+              --context "$KUBERNETES_CONTEXT" \
+              --namespace leadflow \
+              -o jsonpath='{.subsets[*].addresses[*].ip}')"
+            if [[ -z "$endpoints" ]]; then
+              echo "::error::Service '$service' has no ready endpoints."
+              exit 1
+            fi
+          done
+
+      - name: Check backend health endpoint
+        run: |
+          kubectl exec \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace leadflow \
+            deployment/backend \
+            -- node -e 'fetch("http://127.0.0.1:3000/healthz").then((response) => {
+              if (!response.ok) throw new Error(`health endpoint returned ${response.status}`);
+            }).catch((error) => {
+              console.error(error);
+              process.exitCode = 1;
+            });'
+
+      - name: Check application through Ingress on localhost
+        run: |
+          curl --noproxy '*' \
+            --fail \
+            --silent \
+            --show-error \
+            --retry 12 \
+            --retry-connrefused \
+            --retry-delay 5 \
+            --retry-max-time 90 \
+            --output /dev/null \
+            --write-out 'Ingress returned HTTP %{http_code}\n' \
+            http://127.0.0.1/
+
+      - name: Collect cluster diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods,services,endpoints,ingress \
+            --context "$KUBERNETES_CONTEXT" \
+            --all-namespaces
+          kubectl get events \
+            --context "$KUBERNETES_CONTEXT" \
+            --namespace leadflow \
+            --sort-by=.lastTimestamp

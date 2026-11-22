@@ -1,6 +1,5 @@
 # Terraform
 **/.terraform/*
-**/.terraform.lock.hcl
 *.tfstate
 *.tfstate.*
 crash.log
@@ -40,6 +39,3 @@ crash.log
 
 # Keep examples
 !*.tfvars.example
-
-# Optional: commit this if you want provider version locking
-# .terraform.lock.hcl
