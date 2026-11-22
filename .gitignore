@@ -1,0 +1,45 @@
+# Terraform
+**/.terraform/*
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Terraform state
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+
+# Variable files
+*.tfvars
+*.tfvars.json
+
+# Keep examples
+!*.tfvars.example
+
+# Optional: commit this if you want provider version locking
+# .terraform.lock.hcl

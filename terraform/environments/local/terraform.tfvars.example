@@ -1,0 +1,32 @@
+# Copy this file to terraform.tfvars and edit non-secret values.
+# Supply database secrets separately through TF_VAR_* environment variables.
+kube_context          = "kind-leadflow"
+namespace             = "leadflow"
+database_name         = "leadflow"
+app_version           = "1.0.0"
+postgres_storage_size = "5Gi"
+
+postgres_image_name = "postgres"
+postgres_image_tag  = "16"
+migration_image_name = "leadflow-migrate"
+migration_image_tag  = "latest"
+migration_backoff_limit           = 3
+migration_active_deadline_seconds = 300
+migration_timeout                 = "10m"
+backend_image_name   = "leadflow-backend"
+backend_image_tag    = "latest"
+frontend_image_name  = "leadflow-frontend"
+frontend_image_tag   = "latest"
+
+postgres_replicas = 1
+backend_replicas  = 2
+frontend_replicas = 2
+
+postgres_port         = 5432
+backend_container_port = 3000
+backend_service_port   = 3000
+frontend_container_port = 3000
+frontend_service_port   = 80
+
+ingress_class_name = "nginx"
+ingress_hostname   = ""

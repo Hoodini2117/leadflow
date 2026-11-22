@@ -1,0 +1,51 @@
+# Git
+.git
+.gitignore
+
+# Node dependencies
+**/node_modules
+
+# Build output
+**/dist
+**/.next
+**/coverage
+**/.turbo
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode
+.idea
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs
+
+# Python
+__pycache__
+*.pyc
+.venv
+venv
+
+# Terraform
+.terraform
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Kubernetes
+*.swp
+
+# Docker
+docker-compose.override.yml
+
+# Misc
+*.tmp
+*.bak
